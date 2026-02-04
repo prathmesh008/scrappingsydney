@@ -13,9 +13,13 @@ const scrapeEventFinda = async () => {
 
     try {
         browser = await puppeteer.launch({
-            headless: false,
-            defaultViewport: null,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--window-size=1366,768']
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ]
         });
 
         const page = await browser.newPage();
