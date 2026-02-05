@@ -13,11 +13,24 @@ from telegram.ext import (
     ConversationHandler
 )
 
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.prompts import PromptTemplate
+from langchain.schema.runnable import RunnablePassthrough
+from langchain.schema.output_parser import StrOutputParser
+
 from database_manager import db_manager
 
 # Load Env
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
+# Setup Gemini
+if GOOGLE_API_KEY:
+    llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=GOOGLE_API_KEY)
+else:
+    llm = None
+    print("⚠️ GOOGLE_API_KEY missing. AI features will be disabled.")
 
 # Logging
 logging.basicConfig(
@@ -110,21 +123,57 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(response, parse_mode='Markdown', disable_web_page_preview=True)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle free-form chat (Basic integration)."""
+    """Handle free-form chat with RAG (Gemini)."""
     text = update.message.text
     
-    # Semantic Search directly on text
-    results = db_manager.search_events(text, n_results=3)
+    # Semantic Search to get context
+    results = db_manager.search_events(text, n_results=5)
     metadatas = results['metadatas'][0]
     
-    if metadatas:
-        await update.message.reply_text("Here's what I found based on that:")
-        for event in metadatas:
-             await update.message.reply_text(
-                 f"🎈 {event['title']}\n📍 {event['venue']}\n🔗 {event['url']}"
-             )
-    else:
-        await update.message.reply_text("I couldn't find anything specifically for that. Try simpler keywords!")
+    # If no LLM configured, just return list
+    if not llm:
+        if metadatas:
+            await update.message.reply_text("Here's what I found (AI disabled):")
+            for event in metadatas:
+                await update.message.reply_text(f"🎈 {event.get('title')}\n📍 {event.get('venue')}\n🔗 {event.get('url')}")
+        else:
+            await update.message.reply_text("No events found.")
+        return
+
+    # Build Context String for RAG
+    context_str = "\n".join([
+        f"- {e.get('title')} at {e.get('venue')} on {e.get('date')} ({e.get('url')})"
+        for e in metadatas
+    ])
+
+    if not context_str:
+        await update.message.reply_text("I couldn't find any specific events matching that in my database, sorry!")
+        return
+
+    # Prompt Template
+    template = """
+    You are a helpful Sydney Event Assistant.
+    Answer the user's question based ONLY on the following event context.
+
+    Context:
+    {context}
+
+    User Question: {question}
+
+    Format your answer as a friendly chat message suggesting the best options. Include the links.
+    """
+    
+    prompt = PromptTemplate.from_template(template)
+    chain = prompt | llm | StrOutputParser()
+
+    # Generate Answer
+    await update.message.reply_chat_action(action="typing")
+    try:
+        response = await chain.ainvoke({"context": context_str, "question": text})
+        await update.message.reply_text(response, parse_mode='Markdown', disable_web_page_preview=True)
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        await update.message.reply_text("I'm having trouble thinking right now. Try again later!")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Registration cancelled.")
